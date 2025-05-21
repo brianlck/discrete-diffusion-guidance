@@ -887,7 +887,7 @@ class Diffusion(L.LightningModule):
     if not self.config.eval.disable_ema:
       self.load_ema_params()
     if getattr(self.config, 'guidance', None) is not None:
-      if self.config.guidance.method == 'cfg':
+      if self.config.guidance.method == 'cfg' or self.config.guidance.method == 'cfg-smc':
         cond = (torch.ones(self.config.sampling.batch_size, device=self.device) *
                 self.config.guidance.condition).to(torch.long)
       else:
@@ -1132,6 +1132,11 @@ class Diffusion(L.LightningModule):
     NFEs = 0
     cache = None
 
+    log_weights = torch.zeros(
+      (self.config.sampling.batch_size, ),
+      device=self.device
+    )
+
     for i in pbar:
       t = timesteps[i]
       if self.T > 0:  # t in {1/T,..., 1}, to match training
@@ -1163,7 +1168,26 @@ class Diffusion(L.LightningModule):
           move_chance_s=move_chance_s,
           cache=cache)
       else:
-        if self.config.guidance.method == 'cfg':
+        if self.config.guidance.method == 'cfg-smc':
+          xs, q_xs, cache = self._cfg_denoise(
+            cond=cond,
+            gamma=self.config.guidance.gamma,
+            xt=xt,
+            time_conditioning=sigma_t,
+            move_chance_t=move_chance_t,
+            move_chance_s=move_chance_s,
+            cache=cache)
+          log_weights = log_weights + cache['log_weights']
+          from smc import partial_resample_scheme, compute_ess_from_log_w
+
+          ess = compute_ess_from_log_w(log_weights)
+          if ess.cpu().item() < self.config.guidance.resample_threshold * self.config.sampling.batch_size:
+            print("resample! ess:", ess)
+            xs, log_weights = partial_resample_scheme(
+                xs, log_weights, self.config.guidance.resample_fraction * self.config.sampling.batch_size
+            )
+
+        elif self.config.guidance.method == 'cfg':
           xs, q_xs, cache = self._cfg_denoise(
             cond=cond,
             gamma=self.config.guidance.gamma,
@@ -1306,11 +1330,20 @@ class Diffusion(L.LightningModule):
           f"Diffusion type {self.diffusion} not implemented.")
     else:  # gamma != 0 and gamma != 1
       if self.diffusion == 'absorbing_state':
+        q_xs_cond = log_x_theta_cond.softmax(dim=-1) * (move_chance_t - move_chance_s)
+        q_xs_cond[:, :, self.mask_index] = move_chance_s[:, :, 0]
+        q_xs_cond /= move_chance_t
+
+        q_xs_uncond = log_x_theta_uncond.softmax(dim=-1) * (move_chance_t - move_chance_s)
+        q_xs_uncond[:, :, self.mask_index] = move_chance_s[:, :, 0]
+        q_xs_uncond /= move_chance_t
+
         log_x_theta = (gamma * log_x_theta_cond + (1 - gamma) * log_x_theta_uncond)
         x_theta = log_x_theta.softmax(dim=-1)
         q_xs = x_theta * (move_chance_t - move_chance_s)
         q_xs[:, :, self.mask_index] = move_chance_s[:, :, 0]
         q_xs /= move_chance_t
+
       elif (self.diffusion == 'uniform'
             or self.diffusion == 'uniform_data_marginals'):
         log_q_xs_uncond = self._compute_posterior(
@@ -1336,10 +1369,21 @@ class Diffusion(L.LightningModule):
       copy_flag = (xt != self.mask_index).to(torch.bool)
       q_xs[copy_flag] = 0.0
       q_xs[copy_flag, xt[copy_flag]] = 1.0
+      q_xs_uncond[copy_flag] = 0.0
+      q_xs_uncond[copy_flag, xt[copy_flag]] = 1.0
+      q_xs_cond[copy_flag] = 0.0
+      q_xs_cond[copy_flag, xt[copy_flag]] = 1.0
       xs = torch.where(copy_flag, xt, xs)
 
+    log_weights = -q_xs.log() + 1.5 * q_xs_cond.log() + (1 - 1.5) * q_xs_uncond.log()
+    log_weights = torch.nan_to_num(log_weights)
+
+    log_weights = torch.gather(log_weights, -1, xs.unsqueeze(-1)).squeeze(-1)
+    log_weights = log_weights.sum(dim=-1)
+
     return xs, q_xs, {'log_x_theta_uncond': log_x_theta_uncond,
-                      'log_x_theta_cond': log_x_theta_cond}
+                      'log_x_theta_cond': log_x_theta_cond,
+                      'log_weights': log_weights}
 
   def _cbg_denoise(
       self,

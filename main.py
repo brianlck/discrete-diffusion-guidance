@@ -9,12 +9,15 @@ import rich.syntax
 import rich.tree
 import torch
 from tqdm import tqdm
+from omegaconf.dictconfig import DictConfig
 
 import classifier
 import dataloader
 import diffusion
 import eval_utils
 import utils
+
+torch.serialization.add_safe_globals([DictConfig])
 
 omegaconf.OmegaConf.register_new_resolver(
   'cwd', os.getcwd)

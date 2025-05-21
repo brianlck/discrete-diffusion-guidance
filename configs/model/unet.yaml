@@ -1,6 +1,6 @@
 name: unet
 type: unet
-ch: 128 
+ch: 256
 num_res_blocks: 2
 num_scales: 4
 ch_mult: [1, 2, 2, 2]

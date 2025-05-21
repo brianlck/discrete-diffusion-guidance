@@ -6,27 +6,17 @@
 #SBATCH -t 48:00:00                  # Time limit (hh:mm:ss)
 #SBATCH --constraint=h100
 #SBATCH --ntasks-per-node=4
-#SBATCH --gres=gpu:4                  # Type/number of GPUs needed
+#SBATCH --gres=gpu:1                  # Type/number of GPUs needed
 #SBATCH --open-mode=append            # Do not overwrite logs
 #SBATCH --requeue                     # Requeue upon preemption
 #SBATCH -p kempner_h100
 #SBATCH --account kempner_albergo_lab
 
-# NOTE: Need to set the (local) dataset path for downloaded cifar-10 data
 DATASET_PATH="cifar10"
+MODEL="mdlm"
 
-<<comment
-#  Usage:
-cd scripts/
-MODEL=<mdlm|udlm>
-sbatch \
-  --export=ALL,MODEL=${MODEL} \
-  --job-name=train_cifar10_${MODEL} \
-  train_cifar10_unet_guidance.sh
-comment
 
 # Setup environment
-cd ../ || exit  # Go to the root directory of the repo
 source setup_env.sh
 export NCCL_P2P_LEVEL=NVL
 export HYDRA_FULL_ERROR=1
@@ -59,7 +49,7 @@ else
 fi
 
 # To enable preemption re-loading, set `hydra.run.dir` or
-srun python -u -m main \
+srun python sample_cifar.py \
   is_vision=True \
   diffusion=${DIFFUSION} \
   parameterization=${PARAMETERIZATION} \
@@ -69,11 +59,18 @@ srun python -u -m main \
   data=cifar10 \
   data.train=${DATASET_PATH} \
   data.valid=${DATASET_PATH} \
+  guidance=cfg-smc \
+  guidance.condition=7 \
+  guidance.gamma=3.0 \
+  guidance.resample_fraction=0.125 \
+  guidance.resample_threshold=0.1 \
   loader.global_batch_size=512 \
   loader.eval_global_batch_size=64 \
   backbone=unet \
   model=unet \
   optim.lr=2e-4 \
+  eval.checkpoint_path="${PWD}/outputs/cifar10/mdlm/checkpoints/best.ckpt" \
+  eval.generated_samples_path="${PWD}/outputs/cifar10/${RUN_NAME}/samples-smc-fid" \
   lr_scheduler=constant_warmup \
   lr_scheduler.num_warmup_steps=5000 \
   callbacks.checkpoint_every_n_steps.every_n_train_steps=10_000 \
@@ -82,9 +79,9 @@ srun python -u -m main \
   +trainer.check_val_every_n_epoch=null \
   training.guidance.cond_dropout=0.1 \
   eval.generate_samples=True \
-  sampling.num_sample_batches=1 \
-  sampling.batch_size=2 \
+  sampling.num_sample_batches=3125 \
+  sampling.batch_size=16 \
   sampling.use_cache=${sampling_use_cache} \
   sampling.steps=128 \
   wandb.name="cifar10_${RUN_NAME}_large" \
-  hydra.run.dir="${PWD}/outputs/cifar10/${RUN_NAME}"
+  hydra.run.dir="${PWD}/outputs/cifar10/${RUN_NAME}" 

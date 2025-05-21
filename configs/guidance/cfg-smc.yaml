@@ -1,0 +1,5 @@
+method: cfg-smc
+condition: 0
+gamma: 5.0
+resample_fraction: 0.25
+resample_threshold: 0.3
